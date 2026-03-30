@@ -9,12 +9,14 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+const nullableString = z.string().nullish().transform((val) => val ?? undefined);
+
 const DashboardConfigSchema = z.object({
   datasetSummary: z.object({
     title: z.string(),
-    description: z.string().optional(),
-    timeField: z.string().optional(),
-    primaryMetric: z.string().optional(),
+    description: nullableString,
+    timeField: nullableString,
+    primaryMetric: nullableString,
   }),
   kpis: z.array(
     z.object({
@@ -30,12 +32,12 @@ const DashboardConfigSchema = z.object({
       id: z.string(),
       title: z.string(),
       type: z.enum(['line', 'bar', 'area', 'pie']),
-      xField: z.string().optional(),
-      yField: z.string().optional(),
-      categoryField: z.string().optional(),
-      valueField: z.string().optional(),
+      xField: nullableString,
+      yField: nullableString,
+      categoryField: nullableString,
+      valueField: nullableString,
       aggregation: z.enum(['sum', 'avg', 'count', 'min', 'max']).optional(),
-      reasoning: z.string().optional(),
+      reasoning: nullableString,
     })
   ),
   filters: z.array(
@@ -98,17 +100,17 @@ ${JSON.stringify(input, null, 2)}`;
 
   const parsedJson = extractJsonFromText(text);
 
-const normalized = {
-  datasetSummary: parsedJson.datasetSummary ?? {
-    title: 'Generated Dashboard',
-    description: '',
-    timeField: '',
-    primaryMetric: '',
-  },
-  kpis: Array.isArray(parsedJson.kpis) ? parsedJson.kpis : [],
-  charts: Array.isArray(parsedJson.charts) ? parsedJson.charts : [],
-  filters: Array.isArray(parsedJson.filters) ? parsedJson.filters : [],
-};
+    const normalized = {
+    datasetSummary: parsedJson.datasetSummary ?? {
+        title: 'Generated Dashboard',
+        description: undefined,
+        timeField: undefined,
+        primaryMetric: undefined,
+    },
+    kpis: Array.isArray(parsedJson.kpis) ? parsedJson.kpis : [],
+    charts: Array.isArray(parsedJson.charts) ? parsedJson.charts : [],
+    filters: Array.isArray(parsedJson.filters) ? parsedJson.filters : [],
+    };
 
-return DashboardConfigSchema.parse(normalized);
+    return DashboardConfigSchema.parse(normalized);
 }
