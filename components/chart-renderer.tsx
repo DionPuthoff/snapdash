@@ -23,6 +23,21 @@ type Row = Record<string, string>;
 
 const PIE_COLORS = ['#29F0BA', '#7EF7D6', '#1AC6A0', '#0EA37E', '#C7FFF0', '#5DEFD0'];
 
+function parseNumber(value: unknown): number | null {
+  if (value == null) return null;
+
+  const raw = String(value).trim();
+
+  if (!raw || raw === '-' || raw === '—' || raw.toLowerCase() === 'n/a') {
+    return null;
+  }
+
+  const cleaned = raw.replace(/[$,%]/g, '').replace(/,/g, '');
+  const num = Number(cleaned);
+
+  return Number.isNaN(num) ? null : num;
+}
+
 function aggregateValues(values: number[], aggregation?: string) {
   if (!values.length) return 0;
 
@@ -71,41 +86,154 @@ function sortLabels(a: string, b: string) {
   });
 }
 
-function buildChartData(rows: Row[], chart: ChartConfig, chartType: ChartType) {
-  const xKey = chart.xField || chart.categoryField;
-  const yKey = chart.yField || chart.valueField;
+function getColumnNames(rows: Row[]) {
+  return Object.keys(rows[0] ?? {});
+}
 
-  if (!xKey || (!yKey && chart.aggregation !== 'count')) return [];
+function getLikelyLabelField(rows: Row[]) {
+  const columns = getColumnNames(rows);
+
+  const preferred = columns.find((col) => {
+    const lower = col.toLowerCase();
+    return (
+      lower.includes('item') ||
+      lower.includes('name') ||
+      lower.includes('drink') ||
+      lower.includes('product') ||
+      lower.includes('menu')
+    );
+  });
+
+  if (preferred) return preferred;
+
+  return columns.find((col) => {
+    const sample = rows.slice(0, 10).map((row) => String(row[col] ?? '').trim());
+    const nonEmpty = sample.filter(Boolean);
+    if (!nonEmpty.length) return false;
+
+    const mostlyText = nonEmpty.some((v) => Number.isNaN(Number(v)));
+    return mostlyText;
+  });
+}
+
+function getLikelyNumericField(rows: Row[], preferredName?: string) {
+  const columns = getColumnNames(rows);
+
+  const preferred = preferredName
+    ? columns.find((col) => col.toLowerCase() === preferredName.toLowerCase())
+    : undefined;
+
+  if (preferred) return preferred;
+
+  const priorityNames = [
+    'calories',
+    'protein',
+    'fat (g)',
+    'fat',
+    'carb. (g)',
+    'carbs',
+    'carbohydrates',
+    'fiber (g)',
+    'fiber',
+    'sodium',
+  ];
+
+  for (const name of priorityNames) {
+    const match = columns.find((col) => col.toLowerCase() === name);
+    if (match) return match;
+  }
+
+  return columns.find((col) => {
+    const values = rows
+      .slice(0, 25)
+      .map((row) => parseNumber(row[col]))
+      .filter((v) => v !== null);
+
+    return values.length >= 3;
+  });
+}
+
+function resolveFields(rows: Row[], chart: ChartConfig) {
+  const configuredLabelField = chart.xField || chart.categoryField;
+  const configuredValueField = chart.yField || chart.valueField;
+
+  const labelField =
+    configuredLabelField && rows.some((row) => String(row[configuredLabelField] ?? '').trim())
+      ? configuredLabelField
+      : getLikelyLabelField(rows);
+
+  const valueField =
+    configuredValueField &&
+    rows.some((row) => parseNumber(row[configuredValueField]) !== null)
+      ? configuredValueField
+      : getLikelyNumericField(rows, chart.yField || chart.valueField || chart.title);
+
+  return { labelField, valueField };
+}
+
+function shouldUseTopN(chart: ChartConfig) {
+  const title = chart.title.toLowerCase();
+  return title.includes('top ');
+}
+
+function getTopN(chart: ChartConfig) {
+  const match = chart.title.toLowerCase().match(/top\s+(\d+)/);
+  return match ? Number(match[1]) : 10;
+}
+
+function buildChartData(rows: Row[], chart: ChartConfig, chartType: ChartType) {
+  if (!rows.length) return [];
+
+  const { labelField, valueField } = resolveFields(rows, chart);
+
+  if (!labelField || (!valueField && chart.aggregation !== 'count')) {
+    return [];
+  }
 
   const grouped = new Map<string, number[]>();
 
   for (const row of rows) {
-    const xValue = row[xKey];
-    if (!xValue) continue;
+    const label = String(row[labelField] ?? '').trim();
+    if (!label) continue;
 
     if (chart.aggregation === 'count') {
-      const existing = grouped.get(xValue) || [];
+      const existing = grouped.get(label) || [];
       existing.push(1);
-      grouped.set(xValue, existing);
+      grouped.set(label, existing);
       continue;
     }
 
-    if (!yKey) continue;
+    if (!valueField) continue;
 
-    const yValue = Number(row[yKey]);
-    if (Number.isNaN(yValue)) continue;
+    const numericValue = parseNumber(row[valueField]);
+    if (numericValue === null) continue;
 
-    const existing = grouped.get(xValue) || [];
-    existing.push(yValue);
-    grouped.set(xValue, existing);
+    const existing = grouped.get(label) || [];
+    existing.push(numericValue);
+    grouped.set(label, existing);
   }
 
-  let result = Array.from(grouped.entries())
-    .map(([label, values]) => ({
-      label,
-      value: aggregateValues(values, chart.aggregation),
-    }))
-    .sort((a, b) => sortLabels(a.label, b.label));
+  let result = Array.from(grouped.entries()).map(([label, values]) => ({
+    label,
+    value: aggregateValues(values, chart.aggregation),
+  }));
+
+  if (shouldUseTopN(chart)) {
+    result = result.sort((a, b) => b.value - a.value).slice(0, getTopN(chart));
+  } else {
+    const looksDateLike = result.some((d) => !Number.isNaN(Date.parse(d.label)));
+    const looksNumericLike = result.every(
+      (d) => d.label.trim() !== '' && !Number.isNaN(Number(d.label))
+    );
+
+    if (looksDateLike || looksNumericLike) {
+      result = result.sort((a, b) => sortLabels(a.label, b.label));
+    } else if (chartType === 'bar' || chartType === 'pie') {
+      result = result.sort((a, b) => b.value - a.value);
+    } else {
+      result = result.sort((a, b) => sortLabels(a.label, b.label));
+    }
+  }
 
   if (chartType === 'pie') {
     result = result.slice(0, 8);
